@@ -1,8 +1,11 @@
 import React, { useState, useMemo, useRef } from 'react';
-import { Plus, Trash2, Calendar, DollarSign, Calculator, Info, Printer, FileSpreadsheet, Trash } from 'lucide-react';
+import { Plus, Trash2, Calendar, DollarSign, Calculator, Info, Printer, FileSpreadsheet, Trash, Camera, Loader2 } from 'lucide-react';
 import jalaali from 'jalaali-js';
 import * as XLSX from 'xlsx';
 import { motion, AnimatePresence } from 'motion/react';
+import { jsPDF } from 'jspdf';
+import domtoimage from 'dom-to-image-more';
+import { GoogleGenAI } from '@google/genai';
 
 type Cheque = {
   id: string;
@@ -67,6 +70,96 @@ export default function App() {
     { id: '1', amount: '', date: '' }
   ]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const [isLoadingOCR, setIsLoadingOCR] = useState(false);
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+
+  const downloadPDF = async () => {
+    const element = document.getElementById('pdf-content');
+    if (!element) return;
+    
+    setIsGeneratingPDF(true);
+    
+    setTimeout(async () => {
+      try {
+        const dataUrl = await domtoimage.toPng(element, { bgcolor: '#ffffff' });
+        const img = new Image();
+        img.src = dataUrl;
+        img.onload = () => {
+          const pdf = new jsPDF('p', 'mm', 'a4');
+          const pdfWidth = pdf.internal.pageSize.getWidth();
+          const pdfHeight = (img.height * pdfWidth) / img.width;
+          
+          pdf.addImage(dataUrl, 'PNG', 0, 0, pdfWidth, pdfHeight);
+          pdf.save('ras-giri.pdf');
+          setIsGeneratingPDF(false);
+        };
+      } catch (err) {
+        console.error(err);
+        alert('خطا در تولید فایل PDF');
+        setIsGeneratingPDF(false);
+      }
+    }, 100);
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsLoadingOCR(true);
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const base64Data = (ev.target?.result as string).split(',')[1];
+        
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: file.type,
+              }
+            },
+            {
+              text: 'Extract the date and amount from this cheque image. Return ONLY a JSON object with `date` (format: YYYY/MM/DD in Jalali) and `amount` (number). If you cannot find them, return null for those fields. Do not include markdown formatting.'
+            }
+          ],
+          config: {
+            responseMimeType: 'application/json',
+          }
+        });
+
+        const text = response.text || '{}';
+        const data = JSON.parse(text);
+        
+        if (data.amount || data.date) {
+          const newCheque = {
+            id: Date.now().toString(),
+            amount: data.amount ? data.amount.toString() : '',
+            date: data.date || ''
+          };
+          
+          if (cheques.length === 1 && !cheques[0].amount && !cheques[0].date) {
+            setCheques([newCheque]);
+          } else {
+            setCheques([...cheques, newCheque]);
+          }
+          alert('اطلاعات چک با موفقیت استخراج شد');
+        } else {
+          alert('اطلاعاتی در تصویر یافت نشد');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('خطا در پردازش تصویر');
+      } finally {
+        setIsLoadingOCR(false);
+        if (imageInputRef.current) imageInputRef.current.value = '';
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 
   const addCheque = () => {
     setCheques([...cheques, { id: Date.now().toString(), amount: '', date: '' }]);
@@ -182,7 +275,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-50 via-slate-100 to-slate-200 py-8 px-4 sm:px-6 lg:px-8 print:bg-white print:py-4">
-      <div className="max-w-4xl mx-auto space-y-8">
+      <div id="pdf-content" className="max-w-4xl mx-auto space-y-8 p-4 bg-transparent">
         {/* Header */}
         <motion.div 
           initial={{ opacity: 0, y: -20 }}
@@ -211,15 +304,19 @@ export default function App() {
               <h2 className="text-lg font-bold text-slate-800">تاریخ مبدا</h2>
             </div>
             <div>
-              <input
-                type="text"
-                value={baseDate}
-                onChange={(e) => setBaseDate(formatJalaliInput(e.target.value))}
-                placeholder="1403/01/01"
-                className={`w-full px-5 py-3 bg-slate-50/50 border rounded-2xl focus:bg-white focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all text-left dir-ltr text-lg print:border-none print:p-0 print:text-right print:font-medium print:bg-transparent ${!isBaseValid && baseDate.length >= 8 ? 'border-red-300 bg-red-50/50 text-red-900' : 'border-slate-200/60'}`}
-                dir="ltr"
-              />
-              {!isBaseValid && baseDate.length >= 8 && (
+              {isGeneratingPDF ? (
+                <div className="w-full px-5 py-3 text-left dir-ltr text-lg font-medium text-slate-800" dir="ltr">{baseDate}</div>
+              ) : (
+                <input
+                  type="text"
+                  value={baseDate}
+                  onChange={(e) => setBaseDate(formatJalaliInput(e.target.value))}
+                  placeholder="1403/01/01"
+                  className={`w-full px-5 py-3 bg-slate-50/50 border rounded-2xl focus:bg-white focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all text-left dir-ltr text-lg print:border-none print:p-0 print:text-right print:font-medium print:bg-transparent ${!isBaseValid && baseDate.length >= 8 ? 'border-red-300 bg-red-50/50 text-red-900' : 'border-slate-200/60'}`}
+                  dir="ltr"
+                />
+              )}
+              {!isBaseValid && baseDate.length >= 8 && !isGeneratingPDF && (
                 <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-red-500 text-sm mt-2 font-medium print:hidden">تاریخ وارد شده نامعتبر است</motion.p>
               )}
             </div>
@@ -229,7 +326,7 @@ export default function App() {
           <motion.div 
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
-            className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-slate-100 p-6 flex flex-wrap gap-3 items-center justify-center print:hidden"
+            className={`bg-white/80 backdrop-blur-xl rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-slate-100 p-6 flex flex-wrap gap-3 items-center justify-center print:hidden ${isGeneratingPDF ? 'hidden' : ''}`}
           >
             <button onClick={addCheque} className="flex items-center gap-2 px-4 py-3 bg-indigo-600 text-white rounded-2xl hover:bg-indigo-700 active:scale-95 transition-all text-sm font-semibold w-[150px] justify-center shadow-sm shadow-indigo-200">
               <Plus className="w-4 h-4" /> افزودن چک
@@ -238,11 +335,17 @@ export default function App() {
               <FileSpreadsheet className="w-4 h-4" /> بارگذاری اکسل
             </button>
             <input type="file" ref={fileInputRef} onChange={handleExcelUpload} accept=".xlsx,.xls" className="hidden" />
+            
+            <button onClick={() => imageInputRef.current?.click()} disabled={isLoadingOCR} className="flex items-center gap-2 px-4 py-3 bg-amber-500 text-white rounded-2xl hover:bg-amber-600 active:scale-95 transition-all text-sm font-semibold w-[150px] justify-center shadow-sm shadow-amber-200 disabled:opacity-70">
+              {isLoadingOCR ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />} خواندن از عکس
+            </button>
+            <input type="file" ref={imageInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
+
             <button onClick={clearAll} className="flex items-center gap-2 px-4 py-3 bg-rose-500 text-white rounded-2xl hover:bg-rose-600 active:scale-95 transition-all text-sm font-semibold w-[150px] justify-center shadow-sm shadow-rose-200">
               <Trash className="w-4 h-4" /> پاک کردن همه
             </button>
             {results && (
-              <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-3 bg-slate-800 text-white rounded-2xl hover:bg-slate-900 active:scale-95 transition-all text-sm font-semibold w-[150px] justify-center shadow-sm shadow-slate-300">
+              <button onClick={downloadPDF} className="flex items-center gap-2 px-4 py-3 bg-slate-800 text-white rounded-2xl hover:bg-slate-900 active:scale-95 transition-all text-sm font-semibold w-[150px] justify-center shadow-sm shadow-slate-300">
                 <Printer className="w-4 h-4" /> خروجی PDF
               </button>
             )}
@@ -272,7 +375,7 @@ export default function App() {
                   <th className="p-4 font-semibold">مبلغ (ریال)</th>
                   <th className="p-4 font-semibold">تاریخ سررسید</th>
                   <th className="p-4 font-semibold text-center">روزها</th>
-                  <th className="p-4 font-semibold text-center print:hidden w-20">عملیات</th>
+                  <th className={`p-4 font-semibold text-center print:hidden w-20 ${isGeneratingPDF ? 'hidden' : ''}`}>عملیات</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100/80">
@@ -289,35 +392,42 @@ export default function App() {
                     >
                       <td className="p-4 text-center text-slate-400 font-medium">{index + 1}</td>
                       <td className="p-4">
-                        <input
-                          type="text"
-                          value={formatNumber(cheque.amount)}
-                          onChange={(e) => {
-                            const val = e.target.value.replace(/\D/g, '');
-                            updateCheque(cheque.id, 'amount', val);
-                          }}
-                          placeholder="مثلا 10,000,000"
-                          className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200/60 rounded-xl focus:bg-white focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all text-left print:border-none print:p-0 print:text-right print:bg-transparent font-medium text-slate-700"
-                          dir="ltr"
-                        />
+                        {isGeneratingPDF ? (
+                          <div className="w-full px-4 py-2.5 text-left font-medium text-slate-700" dir="ltr">{formatNumber(cheque.amount)}</div>
+                        ) : (
+                          <input
+                            type="text"
+                            value={formatNumber(cheque.amount)}
+                            onChange={(e) => {
+                              const val = e.target.value.replace(/\D/g, '');
+                              updateCheque(cheque.id, 'amount', val);
+                            }}
+                            placeholder="مثلا 10,000,000"
+                            className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200/60 rounded-xl focus:bg-white focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all text-left print:border-none print:p-0 print:text-right print:bg-transparent font-medium text-slate-700"
+                            dir="ltr"
+                          />
+                        )}
                       </td>
                       <td className="p-4">
-                        <input
-                          type="text"
-                          value={cheque.date}
-                          onChange={(e) => updateCheque(cheque.id, 'date', formatJalaliInput(e.target.value))}
-                          placeholder="1403/05/12"
-                          className={`w-full px-4 py-2.5 bg-slate-50/50 border rounded-xl focus:bg-white focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all text-left print:border-none print:p-0 print:text-right print:bg-transparent font-medium text-slate-700 ${cheque.isInvalid ? 'border-red-300 bg-red-50/50 text-red-900 focus:border-red-500 focus:ring-red-500/10' : 'border-slate-200/60'}`}
-                          dir="ltr"
-                        />
+                        {isGeneratingPDF ? (
+                          <div className="w-full px-4 py-2.5 text-left font-medium text-slate-700" dir="ltr">{cheque.date}</div>
+                        ) : (
+                          <input
+                            type="text"
+                            value={cheque.date}
+                            onChange={(e) => updateCheque(cheque.id, 'date', formatJalaliInput(e.target.value))}
+                            placeholder="1403/05/12"
+                            className={`w-full px-4 py-2.5 bg-slate-50/50 border rounded-xl focus:bg-white focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all text-left print:border-none print:p-0 print:text-right print:bg-transparent font-medium text-slate-700 ${cheque.isInvalid ? 'border-red-300 bg-red-50/50 text-red-900 focus:border-red-500 focus:ring-red-500/10' : 'border-slate-200/60'}`}
+                            dir="ltr"
+                          />
+                        )}
                       </td>
                       <td className="p-4 text-center font-bold text-slate-600" dir="ltr">
                         {cheque.days}
                       </td>
-                      <td className="p-4 text-center print:hidden">
+                      <td className={`p-4 text-center print:hidden ${isGeneratingPDF ? 'hidden' : ''}`}>
                         <button
                           onClick={() => removeCheque(cheque.id)}
-                          disabled={cheques.length === 1}
                           className="p-2.5 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400 cursor-pointer active:scale-90"
                         >
                           <Trash2 className="w-5 h-5 mx-auto" />
